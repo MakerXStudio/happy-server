@@ -1,0 +1,224 @@
+name: Build and Deploy
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+    workflow_dispatch:
+
+env:
+    ACR_NAME: mxaesharedservicesacr
+    RESOURCE_GROUP: mx-ae-prod-happyserver-rg
+
+jobs:
+    build:
+        name: Build Docker Image
+        runs-on: ubuntu-latest
+        environment: prod
+        permissions:
+            id-token: write
+            contents: read
+        outputs:
+            image-tag: ${{ github.sha }}
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v3
+
+            - name: Login to Azure
+              uses: azure/login@v2
+              with:
+                  client-id: ${{ vars.AZURE_CLIENT_ID }}
+                  tenant-id: ${{ vars.AZURE_TENANT_ID }}
+                  subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+            - name: Login to Azure Container Registry
+              run: |
+                  az acr login --name ${{ env.ACR_NAME }}
+
+            - name: Build and push
+              uses: docker/build-push-action@v5
+              with:
+                  context: .
+                  push: ${{ github.event_name != 'pull_request' }}
+                  tags: |
+                      ${{ env.ACR_NAME }}.azurecr.io/happy-server:${{ github.sha }}
+                      ${{ env.ACR_NAME }}.azurecr.io/happy-server:latest
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
+
+    deploy:
+        name: Deploy to Azure
+        needs: build
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        runs-on: ubuntu-latest
+        environment: prod
+        permissions:
+            id-token: write
+            contents: read
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Azure Login
+              uses: azure/login@v2
+              with:
+                  client-id: ${{ vars.AZURE_CLIENT_ID }}
+                  tenant-id: ${{ vars.AZURE_TENANT_ID }}
+                  subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+            - name: Deploy Infrastructure
+              run: |
+                  az deployment group create \
+                      --name "happy-server-${{ github.sha }}" \
+                      --resource-group "${{ env.RESOURCE_GROUP }}" \
+                      --template-file ./infra/main.bicep \
+                      --parameters \
+                          environmentName=prod \
+                          location=australiaeast \
+                          postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
+                          serverSeed="${{ secrets.SERVER_SEED }}" \
+                          minioPassword="${{ secrets.MINIO_PASSWORD }}" \
+                          handyMasterSecret="${{ secrets.HANDY_MASTER_SECRET }}" \
+                          imageTag="${{ github.sha }}" \
+                          acrName="${{ env.ACR_NAME }}"
+
+            - name: Get App URL
+              id: get-url
+              run: |
+                  APP_URL=$(az containerapp show \
+                      --name happy-prod-server \
+                      --resource-group ${{ env.RESOURCE_GROUP }} \
+                      --query "properties.configuration.ingress.fqdn" \
+                      --output tsv)
+                  echo "app-url=https://$APP_URL" >> $GITHUB_OUTPUT
+
+            - name: Show Container App Status
+              if: always()
+              run: |
+                  echo "=== Server Container App Details ==="
+                  az containerapp show \
+                      --name happy-prod-server \
+                      --resource-group ${{ env.RESOURCE_GROUP }} \
+                      --query "{provisioningState:properties.provisioningState, runningStatus:properties.runningStatus, latestRevision:properties.latestRevisionName}" \
+                      -o table
+
+                  echo ""
+                  echo "=== Server Latest Revision Status ==="
+                  REVISION=$(az containerapp show \
+                      --name happy-prod-server \
+                      --resource-group ${{ env.RESOURCE_GROUP }} \
+                      --query "properties.latestRevisionName" -o tsv)
+
+                  az containerapp revision show \
+                      --name happy-prod-server \
+                      --resource-group ${{ env.RESOURCE_GROUP }} \
+                      --revision "$REVISION" \
+                      --query "{name:name, active:properties.active, replicas:properties.replicas, healthState:properties.healthState, provisioningState:properties.provisioningState, runningState:properties.runningState}" \
+                      -o table
+
+                  echo ""
+                  echo "=== MinIO Container App Details ==="
+                  az containerapp show \
+                      --name happy-prod-minio \
+                      --resource-group ${{ env.RESOURCE_GROUP }} \
+                      --query "{provisioningState:properties.provisioningState, runningStatus:properties.runningStatus, latestRevision:properties.latestRevisionName, ingressFqdn:properties.configuration.ingress.fqdn}" \
+                      -o table || echo "Could not get MinIO status"
+
+                  echo ""
+                  echo "=== MinIO Latest Revision Status ==="
+                  MINIO_REVISION=$(az containerapp show \
+                      --name happy-prod-minio \
+                      --resource-group ${{ env.RESOURCE_GROUP }} \
+                      --query "properties.latestRevisionName" -o tsv) || echo ""
+
+                  if [ -n "$MINIO_REVISION" ]; then
+                      az containerapp revision show \
+                          --name happy-prod-minio \
+                          --resource-group ${{ env.RESOURCE_GROUP }} \
+                          --revision "$MINIO_REVISION" \
+                          --query "{name:name, active:properties.active, replicas:properties.replicas, healthState:properties.healthState, provisioningState:properties.provisioningState, runningState:properties.runningState}" \
+                          -o table || echo "Could not get MinIO revision status"
+                  fi
+
+            - name: Show Container Logs
+              if: always()
+              run: |
+                  echo "=== Container Logs (last 100 lines) ==="
+                  az containerapp logs show \
+                      --name happy-prod-server \
+                      --resource-group ${{ env.RESOURCE_GROUP }} \
+                      --tail 100 \
+                      --follow false || echo "Could not retrieve logs"
+
+            - name: Show System Logs
+              if: always()
+              run: |
+                  echo "=== System Logs ==="
+                  az containerapp logs show \
+                      --name happy-prod-server \
+                      --resource-group ${{ env.RESOURCE_GROUP }} \
+                      --type system \
+                      --tail 50 \
+                      --follow false || echo "Could not retrieve system logs"
+
+            - name: Health Check
+              run: |
+                  echo "Waiting for deployment to stabilize..."
+                  sleep 10
+                  for i in {1..5}; do
+                      echo "Attempt $i: Checking ${{ steps.get-url.outputs.app-url }}/health"
+                      HTTP_CODE=$(curl -s -m 5 -o /tmp/health_response.txt -w "%{http_code}" "${{ steps.get-url.outputs.app-url }}/health" || echo "000")
+                      echo "HTTP Status: $HTTP_CODE"
+                      if [ -f /tmp/health_response.txt ]; then
+                          echo "Response body:"
+                          cat /tmp/health_response.txt
+                          echo ""
+                      fi
+                      if [ "$HTTP_CODE" = "200" ]; then
+                          echo "Health check passed!"
+                          exit 0
+                      fi
+                      echo "Retrying in 5s..."
+                      sleep 5
+                  done
+                  echo "Health check failed after 5 attempts"
+                  exit 1
+
+            - name: Debug on Failure
+              if: failure()
+              run: |
+                  echo "=== DEBUGGING FAILED DEPLOYMENT ==="
+                  echo ""
+                  echo "=== Environment Variables Configured ==="
+                  az containerapp show \
+                      --name happy-prod-server \
+                      --resource-group ${{ env.RESOURCE_GROUP }} \
+                      --query "properties.template.containers[0].env[].name" -o tsv
+
+                  echo ""
+                  echo "=== Container Image ==="
+                  az containerapp show \
+                      --name happy-prod-server \
+                      --resource-group ${{ env.RESOURCE_GROUP }} \
+                      --query "properties.template.containers[0].image" -o tsv
+
+                  echo ""
+                  echo "=== Recent Container Logs (extended) ==="
+                  az containerapp logs show \
+                      --name happy-prod-server \
+                      --resource-group ${{ env.RESOURCE_GROUP }} \
+                      --tail 200 \
+                      --follow false || echo "Could not retrieve logs"
+
+            - name: Deployment Summary
+              run: |
+                  echo "## Deployment Complete :rocket:" >> $GITHUB_STEP_SUMMARY
+                  echo "" >> $GITHUB_STEP_SUMMARY
+                  echo "**Server URL:** ${{ steps.get-url.outputs.app-url }}" >> $GITHUB_STEP_SUMMARY
+                  echo "**Image Tag:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
