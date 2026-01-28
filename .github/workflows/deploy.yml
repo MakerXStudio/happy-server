@@ -106,9 +106,13 @@ jobs:
               run: yarn install --frozen-lockfile
 
             - name: Run Database Migrations
-              run: npx prisma migrate deploy
+              run: |
+                  # URL-encode the password for the connection string
+                  ENCODED_PASSWORD=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['RAW_PASSWORD'], safe=''))")
+                  export DATABASE_URL="postgresql://happyadmin:${ENCODED_PASSWORD}@${{ steps.deploy.outputs.postgres-fqdn }}:5432/happy?sslmode=require"
+                  npx prisma migrate deploy
               env:
-                  DATABASE_URL: postgresql://happyadmin:${{ secrets.POSTGRES_PASSWORD }}@${{ steps.deploy.outputs.postgres-fqdn }}:5432/happy?sslmode=require
+                  RAW_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
 
             - name: Get App URL
               id: get-url
