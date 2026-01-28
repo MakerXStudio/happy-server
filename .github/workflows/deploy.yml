@@ -73,6 +73,7 @@ jobs:
                   subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
             - name: Deploy Infrastructure
+              id: deploy
               run: |
                   az deployment group create \
                       --name "happy-server-${{ github.sha }}" \
@@ -87,6 +88,27 @@ jobs:
                           handyMasterSecret="${{ secrets.HANDY_MASTER_SECRET }}" \
                           imageTag="${{ github.sha }}" \
                           acrName="${{ env.ACR_NAME }}"
+
+                  # Get postgres FQDN from deployment output
+                  POSTGRES_FQDN=$(az deployment group show \
+                      --name "happy-server-${{ github.sha }}" \
+                      --resource-group "${{ env.RESOURCE_GROUP }}" \
+                      --query "properties.outputs.postgresServerFqdn.value" -o tsv)
+                  echo "postgres-fqdn=$POSTGRES_FQDN" >> $GITHUB_OUTPUT
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '20'
+                  cache: 'yarn'
+
+            - name: Install Dependencies
+              run: yarn install --frozen-lockfile
+
+            - name: Run Database Migrations
+              run: npx prisma migrate deploy
+              env:
+                  DATABASE_URL: postgresql://happyadmin:${{ secrets.POSTGRES_PASSWORD }}@${{ steps.deploy.outputs.postgres-fqdn }}:5432/happy?sslmode=require
 
             - name: Get App URL
               id: get-url
