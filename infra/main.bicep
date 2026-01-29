@@ -130,7 +130,7 @@ resource postgresServer 'Microsoft.DBforPostgreSQL/flexibleServers@2023-06-01-pr
 // PostgreSQL Database
 resource postgresDatabase 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2023-06-01-preview' = {
     parent: postgresServer
-    name: 'happyserver'
+    name: 'happy'
     properties: {
         charset: 'UTF8'
         collation: 'en_US.utf8'
@@ -320,7 +320,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
             secrets: [
                 {
                     name: 'database-url'
-                    value: 'postgresql://happyadmin:${uriComponent(postgresPassword)}@${postgresServer.properties.fullyQualifiedDomainName}:5432/happyserver?sslmode=require'
+                    value: 'postgresql://happyadmin:${uriComponent(postgresPassword)}@${postgresServer.properties.fullyQualifiedDomainName}:5432/happy?sslmode=require'
                 }
                 {
                     name: 'redis-url'
