@@ -114,15 +114,23 @@ jobs:
               env:
                   RAW_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
 
-            - name: Get App URL
+            - name: Get App URL and Domain Verification ID
               id: get-url
               run: |
-                  APP_URL=$(az containerapp show \
+                  APP_FQDN=$(az containerapp show \
                       --name happy-prod-server \
                       --resource-group ${{ env.RESOURCE_GROUP }} \
                       --query "properties.configuration.ingress.fqdn" \
                       --output tsv)
-                  echo "app-url=https://$APP_URL" >> $GITHUB_OUTPUT
+                  echo "app-url=https://$APP_FQDN" >> $GITHUB_OUTPUT
+                  echo "app-fqdn=$APP_FQDN" >> $GITHUB_OUTPUT
+
+                  VERIFICATION_ID=$(az containerapp show \
+                      --name happy-prod-server \
+                      --resource-group ${{ env.RESOURCE_GROUP }} \
+                      --query "properties.customDomainVerificationId" \
+                      --output tsv)
+                  echo "domain-verification-id=$VERIFICATION_ID" >> $GITHUB_OUTPUT
 
             - name: Show Container App Status
               if: always()
@@ -248,3 +256,12 @@ jobs:
                   echo "" >> $GITHUB_STEP_SUMMARY
                   echo "**Server URL:** ${{ steps.get-url.outputs.app-url }}" >> $GITHUB_STEP_SUMMARY
                   echo "**Image Tag:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+                  echo "" >> $GITHUB_STEP_SUMMARY
+                  echo "### Custom Domain Setup" >> $GITHUB_STEP_SUMMARY
+                  echo "To configure \`happy.makerx.tech\`, add these DNS records:" >> $GITHUB_STEP_SUMMARY
+                  echo "" >> $GITHUB_STEP_SUMMARY
+                  echo "\`\`\`javascript" >> $GITHUB_STEP_SUMMARY
+                  echo "// In makerx-dns/domains/makerx_tech.js" >> $GITHUB_STEP_SUMMARY
+                  echo "CNAME('happy', '${{ steps.get-url.outputs.app-fqdn }}.')," >> $GITHUB_STEP_SUMMARY
+                  echo "TXT('asuid.happy', '${{ steps.get-url.outputs.domain-verification-id }}')," >> $GITHUB_STEP_SUMMARY
+                  echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
