@@ -10,6 +10,7 @@ on:
 env:
     ACR_NAME: mxaesharedservicesacr
     RESOURCE_GROUP: mx-ae-prod-happyserver-rg
+    CUSTOM_DOMAIN: happy.makerx.tech
 
 jobs:
     build:
@@ -224,6 +225,32 @@ jobs:
                   echo "Health check failed after 5 attempts"
                   exit 1
 
+            - name: Configure Custom Domain
+              run: |
+                  # Check if hostname is already bound
+                  EXISTING=$(az containerapp hostname list \
+                      --name happy-prod-server \
+                      --resource-group ${{ env.RESOURCE_GROUP }} \
+                      --query "[?name=='${{ env.CUSTOM_DOMAIN }}'].name" -o tsv)
+
+                  if [ -n "$EXISTING" ]; then
+                      echo "Custom domain ${{ env.CUSTOM_DOMAIN }} is already configured"
+                  else
+                      echo "Adding custom domain ${{ env.CUSTOM_DOMAIN }}..."
+                      az containerapp hostname add \
+                          --hostname ${{ env.CUSTOM_DOMAIN }} \
+                          --name happy-prod-server \
+                          --resource-group ${{ env.RESOURCE_GROUP }}
+
+                      echo "Binding managed certificate..."
+                      az containerapp hostname bind \
+                          --hostname ${{ env.CUSTOM_DOMAIN }} \
+                          --name happy-prod-server \
+                          --resource-group ${{ env.RESOURCE_GROUP }} \
+                          --environment happy-prod-env \
+                          --validation-method CNAME
+                  fi
+
             - name: Debug on Failure
               if: failure()
               run: |
@@ -254,14 +281,6 @@ jobs:
               run: |
                   echo "## Deployment Complete :rocket:" >> $GITHUB_STEP_SUMMARY
                   echo "" >> $GITHUB_STEP_SUMMARY
-                  echo "**Server URL:** ${{ steps.get-url.outputs.app-url }}" >> $GITHUB_STEP_SUMMARY
+                  echo "**Server URL:** https://${{ env.CUSTOM_DOMAIN }}" >> $GITHUB_STEP_SUMMARY
+                  echo "**Azure URL:** ${{ steps.get-url.outputs.app-url }}" >> $GITHUB_STEP_SUMMARY
                   echo "**Image Tag:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
-                  echo "" >> $GITHUB_STEP_SUMMARY
-                  echo "### Custom Domain Setup" >> $GITHUB_STEP_SUMMARY
-                  echo "To configure \`happy.makerx.tech\`, add these DNS records:" >> $GITHUB_STEP_SUMMARY
-                  echo "" >> $GITHUB_STEP_SUMMARY
-                  echo "\`\`\`javascript" >> $GITHUB_STEP_SUMMARY
-                  echo "// In makerx-dns/domains/makerx_tech.js" >> $GITHUB_STEP_SUMMARY
-                  echo "CNAME('happy', '${{ steps.get-url.outputs.app-fqdn }}.')," >> $GITHUB_STEP_SUMMARY
-                  echo "TXT('asuid.happy', '${{ steps.get-url.outputs.domain-verification-id }}')," >> $GITHUB_STEP_SUMMARY
-                  echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
