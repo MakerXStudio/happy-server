@@ -1,0 +1,33 @@
+name: Teardown Deployment
+
+on:
+    workflow_dispatch:
+
+env:
+    RESOURCE_GROUP: mx-ae-prod-happyserver-rg
+
+jobs:
+    teardown:
+        name: Delete Azure Resources
+        runs-on: ubuntu-latest
+        environment: prod
+        permissions:
+            id-token: write
+            contents: read
+
+        steps:
+            - name: Azure Login
+              uses: azure/login@v2
+              with:
+                  client-id: ${{ vars.AZURE_CLIENT_ID }}
+                  tenant-id: ${{ vars.AZURE_TENANT_ID }}
+                  subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+            - name: Delete Resource Group
+              run: |
+                  echo "Deleting resource group ${{ env.RESOURCE_GROUP }}..."
+                  az group delete \
+                      --name "${{ env.RESOURCE_GROUP }}" \
+                      --yes \
+                      --no-wait
+                  echo "Resource group deletion initiated."
